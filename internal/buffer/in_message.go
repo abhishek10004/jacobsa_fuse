@@ -38,52 +38,126 @@ func GetPageSize() int {
 	return pageSize
 }
 
+var BlockPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 1024*1024) // 1 MiB
+	},
+}
+
 // An incoming message from the kernel, including leading fusekernel.InHeader
 // struct. Provides storage for messages and convenient access to their
 // contents.
 type InMessage struct {
-	remaining []byte
-	storage   []byte
-	size      int
+	blocks   [][]byte
+	size     int
+	consumed int
 }
 
-// NewInMessage creates a new InMessage with its storage initialized.
+// NewInMessage creates a new InMessage.
 func NewInMessage(size int) *InMessage {
-	return &InMessage{
-		storage: make([]byte, size),
+	return &InMessage{}
+}
+
+func (m *InMessage) AllocBlocks(totalSize int) {
+	m.FreeBlocks()
+
+	// Calculate number of 1 MiB blocks needed
+	numBlocks := (totalSize + 1024*1024 - 1) / (1024 * 1024)
+	for i := 0; i < numBlocks; i++ {
+		m.blocks = append(m.blocks, BlockPool.Get().([]byte))
 	}
+	m.consumed = 0
+	m.size = 0
+}
+
+func (m *InMessage) FreeBlocks() {
+	for _, block := range m.blocks {
+		BlockPool.Put(block)
+	}
+	m.blocks = nil
+	m.size = 0
+	m.consumed = 0
+}
+
+func (m *InMessage) ShrinkToFit(n int) {
+	m.size = n
+
+	var bytesNeeded = n
+	var usedBlocks = 0
+	for _, block := range m.blocks {
+		usedBlocks++
+		if bytesNeeded <= len(block) {
+			break
+		}
+		bytesNeeded -= len(block)
+	}
+
+	for i := usedBlocks; i < len(m.blocks); i++ {
+		BlockPool.Put(m.blocks[i])
+	}
+	m.blocks = m.blocks[:usedBlocks]
 }
 
 var readLock sync.Mutex
 
-func (m *InMessage) ReadSingle(r io.Reader) (int, error) {
+func (m *InMessage) ReadSingleContiguous(r io.Reader, storage []byte) (int, error) {
 	readLock.Lock()
 	defer readLock.Unlock()
 
 	// read request length
-	if _, err := io.ReadFull(r, m.storage[0:4]); err != nil {
+	if _, err := io.ReadFull(r, storage[0:4]); err != nil {
 		return 0, err
 	}
 
-	l := m.Header().Len
+	header := (*fusekernel.InHeader)(unsafe.Pointer(&storage[0]))
+	l := header.Len
 	// read remaining request
-	if n, err := io.ReadFull(r, m.storage[4:l]); err != nil {
+	if n, err := io.ReadFull(r, storage[4:l]); err != nil {
 		return n, err
 	}
 	return int(l), nil
 }
 
-// Initialize with the data read by a single call to r.Read. The first call to
+type fder interface {
+	Fd() uintptr
+}
+
+func readSequentially(r io.Reader, blocks [][]byte) (int, error) {
+	var total int
+	for _, block := range blocks {
+		n, err := r.Read(block)
+		total += n
+		if err != nil {
+			if err == io.EOF && total > 0 {
+				return total, nil
+			}
+			return total, err
+		}
+		if n < len(block) {
+			break
+		}
+	}
+	return total, nil
+}
+
+// Initialize with the data read by a single call to r.Read or readv. The first call to
 // Consume will consume the bytes directly after the fusekernel.InHeader
 // struct.
 func (m *InMessage) Init(r io.Reader) error {
-
 	var n int
 	var err error
 	if fusekernel.IsPlatformFuseT {
-		n, err = m.ReadSingle(r)
+		storage := make([]byte, len(m.blocks[0]))
+		n, err = m.ReadSingleContiguous(r, storage)
+		if err == nil {
+			copy(m.blocks[0], storage[:n])
+		}
 	} else {
-		n, err = r.Read(m.storage[:])
+		if f, ok := r.(fder); ok {
+			n, err = readv(int(f.Fd()), m.blocks)
+		} else {
+			n, err = readSequentially(r, m.blocks)
+		}
 	}
 
 	if err != nil {
@@ -96,8 +170,8 @@ func (m *InMessage) Init(r io.Reader) error {
 		return fmt.Errorf("Unexpectedly read only %d bytes.", n)
 	}
 
-	m.size = n
-	m.remaining = m.storage[headerSize:n]
+	m.ShrinkToFit(n)
+	m.consumed = int(headerSize)
 
 	// Check the header's length.
 	if int(m.Header().Len) != n {
@@ -112,12 +186,12 @@ func (m *InMessage) Init(r io.Reader) error {
 
 // Return a reference to the header read in the most recent call to Init.
 func (m *InMessage) Header() *fusekernel.InHeader {
-	return (*fusekernel.InHeader)(unsafe.Pointer(&m.storage[0]))
+	return (*fusekernel.InHeader)(unsafe.Pointer(&m.blocks[0][0]))
 }
 
 // Return the number of bytes left to consume.
 func (m *InMessage) Len() uintptr {
-	return uintptr(len(m.remaining))
+	return uintptr(m.size - m.consumed)
 }
 
 // Consume the next n bytes from the message, returning a nil pointer if there
@@ -127,8 +201,25 @@ func (m *InMessage) Consume(n uintptr) unsafe.Pointer {
 		return nil
 	}
 
-	p := unsafe.Pointer(&m.remaining[0])
-	m.remaining = m.remaining[n:]
+	var blockIdx = 0
+	var offset = m.consumed
+
+	for blockIdx < len(m.blocks) {
+		bLen := len(m.blocks[blockIdx])
+		if offset < bLen {
+			break
+		}
+		offset -= bLen
+		blockIdx++
+	}
+
+	if offset+int(n) > len(m.blocks[blockIdx]) {
+		m.consumed += int(n)
+		return nil
+	}
+
+	p := unsafe.Pointer(&m.blocks[blockIdx][offset])
+	m.consumed += int(n)
 
 	return p
 }
@@ -140,16 +231,53 @@ func (m *InMessage) ConsumeBytes(n uintptr) []byte {
 		return nil
 	}
 
-	b := m.remaining[:n]
-	m.remaining = m.remaining[n:]
+	var blockIdx = 0
+	var offset = m.consumed
 
-	return b
+	for blockIdx < len(m.blocks) {
+		bLen := len(m.blocks[blockIdx])
+		if offset < bLen {
+			break
+		}
+		offset -= bLen
+		blockIdx++
+	}
+
+	if offset+int(n) <= len(m.blocks[blockIdx]) {
+		b := m.blocks[blockIdx][offset : offset+int(n)]
+		m.consumed += int(n)
+		return b
+	}
+
+	res := make([]byte, n)
+	var bytesCopied = 0
+	var remainingToCopy = int(n)
+
+	for remainingToCopy > 0 && blockIdx < len(m.blocks) {
+		bLen := len(m.blocks[blockIdx])
+		availableInBlock := bLen - offset
+		copyLen := availableInBlock
+		if copyLen > remainingToCopy {
+			copyLen = remainingToCopy
+		}
+
+		copy(res[bytesCopied:bytesCopied+copyLen], m.blocks[blockIdx][offset:offset+copyLen])
+
+		bytesCopied += copyLen
+		remainingToCopy -= copyLen
+
+		offset = 0
+		blockIdx++
+	}
+
+	m.consumed += int(n)
+	return res
 }
 
-// Get the next n bytes after the message to use them as a temporary buffer
+// Get a temporary buffer of n bytes
 func (m *InMessage) GetFree(n int) []byte {
-	if n <= 0 || n > len(m.storage)-m.size {
+	if n <= 0 {
 		return nil
 	}
-	return m.storage[m.size : m.size+n]
+	return make([]byte, n)
 }

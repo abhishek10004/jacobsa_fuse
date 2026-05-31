@@ -385,6 +385,7 @@ func (c *Connection) handleInterrupt(fuseID uint64) {
 func (c *Connection) readMessage() (*buffer.InMessage, error) {
 	// Allocate a message.
 	m := c.getInMessage()
+	m.AllocBlocks(c.inMessageSize)
 
 	// Loop past transient errors.
 	for {
@@ -398,7 +399,12 @@ func (c *Connection) readMessage() (*buffer.InMessage, error) {
 		//  *  EINTR means we should try again. (This seems to happen often on
 		//     OS X, cf. http://golang.org/issue/11180)
 		//
-		if pe, ok := err.(*os.PathError); ok {
+		if err == syscall.ENODEV {
+			err = io.EOF
+		} else if err == syscall.EINTR {
+			err = nil
+			continue
+		} else if pe, ok := err.(*os.PathError); ok {
 			switch pe.Err {
 			case syscall.ENODEV:
 				err = io.EOF
