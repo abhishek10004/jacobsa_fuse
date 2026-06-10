@@ -145,13 +145,14 @@ func convertInMessage(
 		}
 
 		entries := make([]fuseops.BatchForgetEntry, 0, in.Count)
-		for i := uint32(0); i < in.Count; i++ {
-			type entry fusekernel.BatchForgetEntryIn
-			ein := (*entry)(inMsg.Consume(unsafe.Sizeof(entry{})))
-			if ein == nil {
-				return nil, errors.New("Corrupt OpBatchForget")
-			}
+		entrySize := unsafe.Sizeof(fusekernel.BatchForgetEntryIn{})
+		buf := inMsg.ConsumeBytes(uintptr(in.Count) * entrySize)
+		if len(buf) < int(in.Count*uint32(entrySize)) {
+			return nil, errors.New("Corrupt OpBatchForget")
+		}
 
+		for i := uint32(0); i < in.Count; i++ {
+			ein := (*fusekernel.BatchForgetEntryIn)(unsafe.Pointer(&buf[uintptr(i)*entrySize]))
 			entries = append(entries, fuseops.BatchForgetEntry{
 				Inode: fuseops.InodeID(ein.Inode),
 				N:     ein.Nlookup,

@@ -38,7 +38,13 @@ func GetPageSize() int {
 	return pageSize
 }
 
-var BlockPool = sync.Pool{
+var BlockPool4K = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 4096)
+	},
+}
+
+var BlockPool1M = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 1024*1024) // 1 MiB
 	},
@@ -61,18 +67,26 @@ func NewInMessage(size int) *InMessage {
 func (m *InMessage) AllocBlocks(totalSize int) {
 	m.FreeBlocks()
 
-	// Calculate number of 1 MiB blocks needed
-	numBlocks := (totalSize + 1024*1024 - 1) / (1024 * 1024)
-	for i := 0; i < numBlocks; i++ {
-		m.blocks = append(m.blocks, BlockPool.Get().([]byte))
+	// Always allocate a 4KB block first for header & metadata
+	m.blocks = append(m.blocks, BlockPool4K.Get().([]byte))
+
+	if totalSize > 4096 {
+		remaining := totalSize - 4096
+		num1MBlocks := (remaining + 1024*1024 - 1) / (1024 * 1024)
+		for i := 0; i < num1MBlocks; i++ {
+			m.blocks = append(m.blocks, BlockPool1M.Get().([]byte))
+		}
 	}
 	m.consumed = 0
 	m.size = 0
 }
 
 func (m *InMessage) FreeBlocks() {
-	for _, block := range m.blocks {
-		BlockPool.Put(block)
+	if len(m.blocks) > 0 {
+		BlockPool4K.Put(m.blocks[0])
+		for i := 1; i < len(m.blocks); i++ {
+			BlockPool1M.Put(m.blocks[i])
+		}
 	}
 	m.blocks = nil
 	m.size = 0
@@ -93,7 +107,11 @@ func (m *InMessage) ShrinkToFit(n int) {
 	}
 
 	for i := usedBlocks; i < len(m.blocks); i++ {
-		BlockPool.Put(m.blocks[i])
+		if i == 0 {
+			BlockPool4K.Put(m.blocks[i])
+		} else {
+			BlockPool1M.Put(m.blocks[i])
+		}
 	}
 	m.blocks = m.blocks[:usedBlocks]
 }
@@ -122,24 +140,6 @@ type fder interface {
 	Fd() uintptr
 }
 
-func readSequentially(r io.Reader, blocks [][]byte) (int, error) {
-	var total int
-	for _, block := range blocks {
-		n, err := r.Read(block)
-		total += n
-		if err != nil {
-			if err == io.EOF && total > 0 {
-				return total, nil
-			}
-			return total, err
-		}
-		if n < len(block) {
-			break
-		}
-	}
-	return total, nil
-}
-
 // Initialize with the data read by a single call to r.Read or readv. The first call to
 // Consume will consume the bytes directly after the fusekernel.InHeader
 // struct.
@@ -147,16 +147,31 @@ func (m *InMessage) Init(r io.Reader) error {
 	var n int
 	var err error
 	if fusekernel.IsPlatformFuseT {
-		storage := make([]byte, len(m.blocks[0]))
+		var cap int
+		for _, b := range m.blocks {
+			cap += len(b)
+		}
+		storage := make([]byte, cap)
 		n, err = m.ReadSingleContiguous(r, storage)
 		if err == nil {
-			copy(m.blocks[0], storage[:n])
+			var copied int
+			for _, b := range m.blocks {
+				if copied >= n {
+					break
+				}
+				toCopy := len(b)
+				if copied+toCopy > n {
+					toCopy = n - copied
+				}
+				copy(b, storage[copied:copied+toCopy])
+				copied += toCopy
+			}
 		}
 	} else {
 		if f, ok := r.(fder); ok {
 			n, err = readv(int(f.Fd()), m.blocks)
 		} else {
-			n, err = readSequentially(r, m.blocks)
+			return fmt.Errorf("Reader does not support Fd")
 		}
 	}
 

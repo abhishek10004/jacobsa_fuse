@@ -15,7 +15,7 @@
 package buffer
 
 import (
-	"bytes"
+	"os"
 	"testing"
 	"unsafe"
 
@@ -26,19 +26,24 @@ func TestInMessageAllocAndFree(t *testing.T) {
 	m := NewInMessage(0)
 	m.AllocBlocks(17 * 1024 * 1024) // 17 MiB total size
 
-	// 17 1 MiB blocks
-	if len(m.blocks) != 17 {
-		t.Errorf("expected 17 blocks, got %d", len(m.blocks))
+	// 1 4KB block + 17 1 MiB blocks = 18 blocks
+	if len(m.blocks) != 18 {
+		t.Errorf("expected 18 blocks, got %d", len(m.blocks))
 	}
 
-	// 1 MiB blocks
-	for i := 0; i < 17; i++ {
+	// Block 0: 4 KiB
+	if len(m.blocks[0]) != 4096 {
+		t.Errorf("expected block 0 to be 4 KiB, got %d", len(m.blocks[0]))
+	}
+
+	// Blocks 1-17: 1 MiB
+	for i := 1; i < 18; i++ {
 		if len(m.blocks[i]) != 1024*1024 {
 			t.Errorf("expected block %d to be 1 MiB, got %d", i, len(m.blocks[i]))
 		}
 	}
 
-	// Shrink to fit for small message
+	// Shrink to fit for small message (fits within the 4KB first block)
 	m.ShrinkToFit(100)
 	if len(m.blocks) != 1 {
 		t.Errorf("expected 1 block after shrinking to 100 bytes, got %d", len(m.blocks))
@@ -52,13 +57,10 @@ func TestInMessageAllocAndFree(t *testing.T) {
 
 func TestInMessageConsumeAndBytes(t *testing.T) {
 	m := NewInMessage(0)
-	m.AllocBlocks(3 * 1024 * 1024) // 3 MiB total size
+	// Allocate blocks for 4096 + 2000 bytes
+	m.AllocBlocks(4096 + 2000)
 
-	// Populate mock data across blocks
-	// block 0: 1 MiB
-	// block 1: 1 MiB
-	// block 2: 1 MiB
-	msgLen := 3 * 1024 * 1024
+	msgLen := 4096 + 2000
 
 	// Build a dummy input stream
 	data := make([]byte, msgLen)
@@ -68,17 +70,23 @@ func TestInMessageConsumeAndBytes(t *testing.T) {
 	header.Opcode = 123
 	header.Unique = 456
 
-	// Write some bytes at the beginning of Block 1 (offset: 1 MiB)
-	block1Offset := 1024 * 1024
-	data[block1Offset] = 'A'
-	data[block1Offset+1] = 'B'
-	// Write some bytes across Block 1 / Block 2 boundary
-	boundaryOffset := 2 * 1024 * 1024
-	data[boundaryOffset-1] = 'Y'
-	data[boundaryOffset] = 'Z'
+	// Write some bytes spanning across the 4KB boundary
+	data[4095] = 'Y'
+	data[4096] = 'Z'
 
-	r := bytes.NewReader(data)
-	err := m.Init(r)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe failed: %v", err)
+	}
+	defer r.Close()
+
+	_, err = w.Write(data)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	w.Close()
+
+	err = m.Init(r)
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -87,34 +95,21 @@ func TestInMessageConsumeAndBytes(t *testing.T) {
 		t.Errorf("expected Unique = 456, got %d", m.Header().Unique)
 	}
 
-	// Consume a dummy struct from Block 0
+	// Consume a dummy struct from Block 0 (offset 40 to 64)
 	p := m.Consume(24)
 	if p == nil {
 		t.Fatalf("Consume returned nil")
 	}
 
-	// Consume remaining bytes to get 'A' and 'B' from the start of Block 1
-	// consumed is currently 40 + 24 = 64.
-	// We need to consume up to 1 MiB.
-	skip := block1Offset - 64
+	// Consume remaining bytes of Block 0 up to offset 4095 (so consumed is 4095)
+	skip := 4095 - 40 - 24
 	m.Consume(uintptr(skip))
 
-	// Now we are at offset 1 MiB. The next bytes are 'A' and 'B'.
-	ab := m.ConsumeBytes(2)
-	if string(ab) != "AB" {
-		t.Errorf("expected 'AB', got %q", string(ab))
-	}
-
-	// Now consume up to the boundary
-	// consumed is currently 1 MiB + 2.
-	// We need to consume up to 2 MiB - 1.
-	skip = 1024*1024 - 3
-	m.Consume(uintptr(skip))
-
-	// Now we are 1 byte before the 2 MiB boundary (offset: 2 MiB - 1)
-	yz := m.ConsumeBytes(2) // spans across boundary
+	// Now we are at offset 4095. The next bytes are 'Y' and 'Z'.
+	// This spans across the 4KB boundary (since Block 0 size is 4096, index 4095 is last byte, 4096 is first byte of Block 1).
+	yz := m.ConsumeBytes(2)
 	if string(yz) != "YZ" {
-		t.Errorf("expected 'YZ' spanning across boundary, got %q", string(yz))
+		t.Errorf("expected 'YZ', got %q", string(yz))
 	}
 
 	m.FreeBlocks()
