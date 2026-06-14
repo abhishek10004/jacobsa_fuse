@@ -289,6 +289,48 @@ func (m *InMessage) ConsumeBytes(n uintptr) []byte {
 	return res
 }
 
+// Equivalent to ConsumeBytes, except returns a slice of slices referencing the
+// underlying blocks, without allocations/copies.
+func (m *InMessage) ConsumeVector(n uintptr) [][]byte {
+	if n > m.Len() {
+		return nil
+	}
+
+	var blockIdx = 0
+	var offset = m.consumed
+
+	for blockIdx < len(m.blocks) {
+		bLen := len(m.blocks[blockIdx])
+		if offset < bLen {
+			break
+		}
+		offset -= bLen
+		blockIdx++
+	}
+
+	var res [][]byte
+	var remainingToCopy = int(n)
+
+	for remainingToCopy > 0 && blockIdx < len(m.blocks) {
+		bLen := len(m.blocks[blockIdx])
+		availableInBlock := bLen - offset
+		copyLen := availableInBlock
+		if copyLen > remainingToCopy {
+			copyLen = remainingToCopy
+		}
+
+		res = append(res, m.blocks[blockIdx][offset:offset+copyLen])
+
+		remainingToCopy -= copyLen
+		offset = 0
+		blockIdx++
+	}
+
+	m.consumed += int(n)
+	return res
+}
+
+
 // Get a temporary buffer of n bytes
 func (m *InMessage) GetFree(n int) []byte {
 	if n <= 0 {

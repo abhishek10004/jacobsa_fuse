@@ -796,6 +796,7 @@ type WriteFileOp struct {
 	// to be because it uses file mmapping machinery
 	// (https://tinyurl.com/avxy3dvm) to write a page at a time.
 	Data      []byte
+	DataBlocks [][]byte
 	OpContext OpContext
 
 	// If set, this function will be invoked after the operation response has been

@@ -180,7 +180,7 @@ func (c *Connection) Init() error {
 	// Respond to the init op.
 	initOp.Library = c.protocol
 	initOp.MaxReadahead = maxReadahead
-	
+
 	maxPayload := c.inMessageSize - buffer.GetPageSize()
 	initOp.MaxWrite = uint32(maxPayload)
 

@@ -499,16 +499,31 @@ func convertInMessage(
 			return nil, errors.New("Corrupt OpWrite")
 		}
 
-		buf := inMsg.ConsumeBytes(inMsg.Len())
-		if len(buf) < int(in.Size) {
-			return nil, errors.New("Corrupt OpWrite")
+		var buf []byte
+		var dataBlocks [][]byte
+
+		if config.EnableVectoredWrites {
+			dataBlocks = inMsg.ConsumeVector(inMsg.Len())
+			var totalLen int
+			for _, b := range dataBlocks {
+				totalLen += len(b)
+			}
+			if totalLen < int(in.Size) {
+				return nil, errors.New("Corrupt OpWrite")
+			}
+		} else {
+			buf = inMsg.ConsumeBytes(inMsg.Len())
+			if len(buf) < int(in.Size) {
+				return nil, errors.New("Corrupt OpWrite")
+			}
 		}
 
 		o = &fuseops.WriteFileOp{
-			Inode:  fuseops.InodeID(inMsg.Header().Nodeid),
-			Handle: fuseops.HandleID(in.Fh),
-			Data:   buf,
-			Offset: int64(in.Offset),
+			Inode:      fuseops.InodeID(inMsg.Header().Nodeid),
+			Handle:     fuseops.HandleID(in.Fh),
+			Data:       buf,
+			DataBlocks: dataBlocks,
+			Offset:     int64(in.Offset),
 			OpContext: fuseops.OpContext{
 				FuseID: inMsg.Header().Unique,
 				Pid:    inMsg.Header().Pid,
@@ -941,7 +956,13 @@ func (c *Connection) kernelResponseForOp(
 
 	case *fuseops.WriteFileOp:
 		out := (*fusekernel.WriteOut)(m.Grow(int(unsafe.Sizeof(fusekernel.WriteOut{}))))
-		out.Size = uint32(len(o.Data))
+		writeSize := len(o.Data)
+		if writeSize == 0 && len(o.DataBlocks) > 0 {
+			for _, b := range o.DataBlocks {
+				writeSize += len(b)
+			}
+		}
+		out.Size = uint32(writeSize)
 
 	case *fuseops.SyncFileOp:
 		// Empty response

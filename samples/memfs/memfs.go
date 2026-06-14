@@ -693,8 +693,22 @@ func (fs *memFS) WriteFile(
 	// Find the inode in question.
 	inode := fs.getInodeOrDie(op.Inode)
 
+	data := op.Data
+	if len(data) == 0 && len(op.DataBlocks) > 0 {
+		var totalSize int
+		for _, b := range op.DataBlocks {
+			totalSize += len(b)
+		}
+		data = make([]byte, totalSize)
+		var offset int
+		for _, b := range op.DataBlocks {
+			copy(data[offset:], b)
+			offset += len(b)
+		}
+	}
+
 	// Serve the request.
-	_, err := inode.WriteAt(op.Data, op.Offset)
+	_, err := inode.WriteAt(data, op.Offset)
 
 	op.Callback = fs.writeFileCallback
 
