@@ -238,9 +238,18 @@ type MountConfig struct {
 	// in ReadFileOp.Data.
 	//
 	// Currently, both the read mechanisms can coexist. The library's behavior is
-	// to always provide ReadFileOp.Dst. If the file system populates ReadFileOp.Data,
-	// that data will be used for a vectored read, irrespective of this flag's value.
+	// to always provide ReadFileOp.Dst (except when EnableVectoredReads is true
+	// and the read size is larger than the pre-allocated incoming message block).
+	// If the file system populates ReadFileOp.Data, that data will be used for a
+	// vectored read, irrespective of this flag's value.
 	UseVectoredRead bool
+
+	// EnableVectoredReads bypasses allocating a large contiguous buffer in
+	// ReadFileOp.Dst when the read size is larger than the pre-allocated incoming
+	// message block. Instead, ReadFileOp.Dst will be nil, forcing the filesystem
+	// to use ReadFileOp.Data to return the read payload. This avoids allocations
+	// and copy overhead for large reads.
+	EnableVectoredReads bool
 
 	// EnableVectoredWrites bypasses copying write payload bytes into a single
 	// contiguous slice in WriteFileOp.Data, instead providing the raw non-contiguous

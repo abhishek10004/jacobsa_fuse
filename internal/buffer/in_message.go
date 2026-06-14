@@ -38,7 +38,6 @@ func GetPageSize() int {
 	return pageSize
 }
 
-
 var BlockPool1M = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 1024*1024) // 1 MiB
@@ -359,9 +358,16 @@ func (m *InMessage) ConsumeVector(n uintptr) [][]byte {
 	return res
 }
 
-// Get a temporary buffer of n bytes
-func (m *InMessage) GetFree(n int) []byte {
+// Get a temporary buffer of n bytes. If it fits in the first block, we slice it
+// directly. If it does not fit, we allocate a separate buffer only if allocateDst is true.
+func (m *InMessage) GetFree(n int, allocateDst bool) []byte {
 	if n <= 0 {
+		return nil
+	}
+	if len(m.blocks) > 0 && m.size+n <= len(m.blocks[0]) {
+		return m.blocks[0][m.size : m.size+n]
+	}
+	if !allocateDst {
 		return nil
 	}
 	buf, pool := getBuffer(n)

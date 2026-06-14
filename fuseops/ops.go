@@ -711,11 +711,15 @@ type ReadFileOp struct {
 
 	// The destination buffer, whose length gives the size of the read.
 	// The file system can write to this buffer for non-vectored reads.
+	// Note: Dst will be nil if EnableVectoredReads is enabled and the read size
+	// is larger than the pre-allocated buffer size. In this case, the file system
+	// must use the Data field instead.
 	Dst []byte
 
 	// Set by the file system:
 	// A list of slices of data to send back to the client.
 	// If this field is populated, the contents of `Dst` will be ignored.
+	// If `Dst` is nil, this field MUST be populated to return any data.
 	Data [][]byte
 
 	// Set by the file system: the number of bytes read.

@@ -397,7 +397,7 @@ func convertInMessage(
 			},
 		}
 		// Use part of the incoming message storage as the read buffer.
-		to.Dst = inMsg.GetFree(int(in.Size))
+		to.Dst = inMsg.GetFree(int(in.Size), !config.EnableVectoredReads)
 		o = to
 
 	case fusekernel.OpReaddir:
