@@ -38,11 +38,6 @@ func GetPageSize() int {
 	return pageSize
 }
 
-var BlockPool4K = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 4096)
-	},
-}
 
 var BlockPool1M = sync.Pool{
 	New: func() interface{} {
@@ -50,13 +45,33 @@ var BlockPool1M = sync.Pool{
 	},
 }
 
+var BlockPool1MPlus = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 1024*1024+pageSize)
+	},
+}
+
+type pooledBuffer struct {
+	buf  []byte
+	pool *sync.Pool
+}
+
+func getBuffer(n int) ([]byte, *sync.Pool) {
+	if n <= 1048576 {
+		return BlockPool1M.Get().([]byte), &BlockPool1M
+	}
+	return make([]byte, n), nil
+}
+
 // An incoming message from the kernel, including leading fusekernel.InHeader
 // struct. Provides storage for messages and convenient access to their
 // contents.
 type InMessage struct {
-	blocks   [][]byte
-	size     int
-	consumed int
+	blocks      [][]byte
+	size        int
+	consumed    int
+	tempBuffers [2]pooledBuffer
+	numTemps    int
 }
 
 // NewInMessage creates a new InMessage.
@@ -67,11 +82,11 @@ func NewInMessage(size int) *InMessage {
 func (m *InMessage) AllocBlocks(totalSize int) {
 	m.FreeBlocks()
 
-	// Always allocate a 4KB block first for header & metadata
-	m.blocks = append(m.blocks, BlockPool4K.Get().([]byte))
+	// Always allocate a 1MB+pageSize block first for header & metadata & payload
+	m.blocks = append(m.blocks, BlockPool1MPlus.Get().([]byte))
 
-	if totalSize > 4096 {
-		remaining := totalSize - 4096
+	if totalSize > len(m.blocks[0]) {
+		remaining := totalSize - len(m.blocks[0])
 		num1MBlocks := (remaining + 1024*1024 - 1) / (1024 * 1024)
 		for i := 0; i < num1MBlocks; i++ {
 			m.blocks = append(m.blocks, BlockPool1M.Get().([]byte))
@@ -83,7 +98,7 @@ func (m *InMessage) AllocBlocks(totalSize int) {
 
 func (m *InMessage) FreeBlocks() {
 	if len(m.blocks) > 0 {
-		BlockPool4K.Put(m.blocks[0])
+		BlockPool1MPlus.Put(m.blocks[0])
 		for i := 1; i < len(m.blocks); i++ {
 			BlockPool1M.Put(m.blocks[i])
 		}
@@ -91,6 +106,15 @@ func (m *InMessage) FreeBlocks() {
 	m.blocks = nil
 	m.size = 0
 	m.consumed = 0
+
+	for i := 0; i < m.numTemps; i++ {
+		tb := m.tempBuffers[i]
+		if tb.pool != nil {
+			tb.pool.Put(tb.buf)
+		}
+		m.tempBuffers[i] = pooledBuffer{}
+	}
+	m.numTemps = 0
 }
 
 func (m *InMessage) ShrinkToFit(n int) {
@@ -108,7 +132,7 @@ func (m *InMessage) ShrinkToFit(n int) {
 
 	for i := usedBlocks; i < len(m.blocks); i++ {
 		if i == 0 {
-			BlockPool4K.Put(m.blocks[i])
+			BlockPool1MPlus.Put(m.blocks[i])
 		} else {
 			BlockPool1M.Put(m.blocks[i])
 		}
@@ -264,7 +288,12 @@ func (m *InMessage) ConsumeBytes(n uintptr) []byte {
 		return b
 	}
 
-	res := make([]byte, n)
+	buf, pool := getBuffer(int(n))
+	if pool != nil && m.numTemps < len(m.tempBuffers) {
+		m.tempBuffers[m.numTemps] = pooledBuffer{buf: buf, pool: pool}
+		m.numTemps++
+	}
+	res := buf[:n]
 	var bytesCopied = 0
 	var remainingToCopy = int(n)
 
@@ -330,11 +359,15 @@ func (m *InMessage) ConsumeVector(n uintptr) [][]byte {
 	return res
 }
 
-
 // Get a temporary buffer of n bytes
 func (m *InMessage) GetFree(n int) []byte {
 	if n <= 0 {
 		return nil
 	}
-	return make([]byte, n)
+	buf, pool := getBuffer(n)
+	if pool != nil && m.numTemps < len(m.tempBuffers) {
+		m.tempBuffers[m.numTemps] = pooledBuffer{buf: buf, pool: pool}
+		m.numTemps++
+	}
+	return buf[:n]
 }

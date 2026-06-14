@@ -26,24 +26,25 @@ func TestInMessageAllocAndFree(t *testing.T) {
 	m := NewInMessage(0)
 	m.AllocBlocks(17 * 1024 * 1024) // 17 MiB total size
 
-	// 1 4KB block + 17 1 MiB blocks = 18 blocks
-	if len(m.blocks) != 18 {
-		t.Errorf("expected 18 blocks, got %d", len(m.blocks))
+	// 1 (1MB + pageSize) block + 16 1 MiB blocks = 17 blocks
+	if len(m.blocks) != 17 {
+		t.Errorf("expected 17 blocks, got %d", len(m.blocks))
 	}
 
-	// Block 0: 4 KiB
-	if len(m.blocks[0]) != 4096 {
-		t.Errorf("expected block 0 to be 4 KiB, got %d", len(m.blocks[0]))
+	// Block 0: 1 MiB + pageSize
+	expectedBlock0Size := 1024*1024 + GetPageSize()
+	if len(m.blocks[0]) != expectedBlock0Size {
+		t.Errorf("expected block 0 to be %d, got %d", expectedBlock0Size, len(m.blocks[0]))
 	}
 
-	// Blocks 1-17: 1 MiB
-	for i := 1; i < 18; i++ {
+	// Blocks 1-16: 1 MiB
+	for i := 1; i < 17; i++ {
 		if len(m.blocks[i]) != 1024*1024 {
 			t.Errorf("expected block %d to be 1 MiB, got %d", i, len(m.blocks[i]))
 		}
 	}
 
-	// Shrink to fit for small message (fits within the 4KB first block)
+	// Shrink to fit for small message (fits within the first block)
 	m.ShrinkToFit(100)
 	if len(m.blocks) != 1 {
 		t.Errorf("expected 1 block after shrinking to 100 bytes, got %d", len(m.blocks))
@@ -57,10 +58,11 @@ func TestInMessageAllocAndFree(t *testing.T) {
 
 func TestInMessageConsumeAndBytes(t *testing.T) {
 	m := NewInMessage(0)
-	// Allocate blocks for 4096 + 2000 bytes
-	m.AllocBlocks(4096 + 2000)
+	// Allocate blocks for 1MB + pageSize + 2000 bytes
+	firstBlockSize := 1024*1024 + GetPageSize()
+	m.AllocBlocks(firstBlockSize + 2000)
 
-	msgLen := 4096 + 2000
+	msgLen := firstBlockSize + 2000
 
 	// Build a dummy input stream
 	data := make([]byte, msgLen)
@@ -70,9 +72,9 @@ func TestInMessageConsumeAndBytes(t *testing.T) {
 	header.Opcode = 123
 	header.Unique = 456
 
-	// Write some bytes spanning across the 4KB boundary
-	data[4095] = 'Y'
-	data[4096] = 'Z'
+	// Write some bytes spanning across the block boundary
+	data[firstBlockSize-1] = 'Y'
+	data[firstBlockSize] = 'Z'
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -101,12 +103,12 @@ func TestInMessageConsumeAndBytes(t *testing.T) {
 		t.Fatalf("Consume returned nil")
 	}
 
-	// Consume remaining bytes of Block 0 up to offset 4095 (so consumed is 4095)
-	skip := 4095 - 40 - 24
+	// Consume remaining bytes of Block 0 up to block boundary (so consumed is firstBlockSize - 1)
+	skip := firstBlockSize - 1 - 40 - 24
 	m.Consume(uintptr(skip))
 
-	// Now we are at offset 4095. The next bytes are 'Y' and 'Z'.
-	// This spans across the 4KB boundary (since Block 0 size is 4096, index 4095 is last byte, 4096 is first byte of Block 1).
+	// Now we are at the end of block 0. The next bytes are 'Y' and 'Z'.
+	// This spans across the boundary.
 	yz := m.ConsumeBytes(2)
 	if string(yz) != "YZ" {
 		t.Errorf("expected 'YZ', got %q", string(yz))
@@ -114,3 +116,59 @@ func TestInMessageConsumeAndBytes(t *testing.T) {
 
 	m.FreeBlocks()
 }
+
+var benchmarkSink []byte
+
+func BenchmarkConsumeBytesSpanning(b *testing.B) {
+	m := NewInMessage(0)
+	firstBlockSize := 1024*1024 + GetPageSize()
+	totalSize := firstBlockSize + 2000
+	m.AllocBlocks(totalSize)
+	
+	m.blocks[0][firstBlockSize-1] = 'Y'
+	m.blocks[1][0] = 'Z'
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		m.consumed = firstBlockSize - 1
+		m.size = totalSize
+		
+		res := m.ConsumeBytes(2)
+		if len(res) != 2 || res[0] != 'Y' || res[1] != 'Z' {
+			b.Fatalf("unexpected result: %v", res)
+		}
+		benchmarkSink = res
+		m.FreeBlocks()
+		m.AllocBlocks(totalSize)
+		m.blocks[0][firstBlockSize-1] = 'Y'
+		m.blocks[1][0] = 'Z'
+	}
+	m.FreeBlocks()
+}
+
+func BenchmarkGetFree(b *testing.B) {
+	m := NewInMessage(0)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		res := m.GetFree(10000)
+		if len(res) != 10000 {
+			b.Fatalf("expected 10000, got %d", len(res))
+		}
+		benchmarkSink = res
+		m.FreeBlocks()
+	}
+}
+
+func BenchmarkAllocBlocks(b *testing.B) {
+	m := NewInMessage(0)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		m.AllocBlocks(4096 + 2000)
+		m.FreeBlocks()
+	}
+}
+
