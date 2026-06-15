@@ -22,6 +22,7 @@ import (
 	"unsafe"
 
 	"github.com/jacobsa/fuse/internal/fusekernel"
+	"golang.org/x/sys/unix"
 )
 
 // All requests read from the kernel, without data, are shorter than
@@ -29,7 +30,7 @@ import (
 var pageSize int
 
 func init() {
-	pageSize = syscall.Getpagesize()
+	pageSize = unix.Getpagesize()
 }
 
 // Return the hardware page size. Note that this is not always 4KiB! Notably
@@ -38,29 +39,59 @@ func GetPageSize() int {
 	return pageSize
 }
 
-var BlockPool1M = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 1024*1024) // 1 MiB
-	},
+
+type blockPool struct {
+	mu       sync.Mutex
+	list     [][]byte
+	limit    int
+	alloc    func() []byte
+	overflow sync.Pool
 }
 
-var BlockPool1MPlus = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 1024*1024+pageSize)
-	},
-}
-
-type pooledBuffer struct {
-	buf  []byte
-	pool *sync.Pool
-}
-
-func getBuffer(n int) ([]byte, *sync.Pool) {
-	if n <= 1048576 {
-		return BlockPool1M.Get().([]byte), &BlockPool1M
+func newBlockPool(limit int, alloc func() []byte) *blockPool {
+	p := &blockPool{
+		limit: limit,
+		alloc: alloc,
 	}
-	return make([]byte, n), nil
+	p.overflow.New = func() interface{} {
+		return p.alloc()
+	}
+	return p
 }
+
+func (p *blockPool) Get() []byte {
+	p.mu.Lock()
+	l := len(p.list)
+	if l > 0 {
+		buf := p.list[l-1]
+		p.list = p.list[:l-1]
+		p.mu.Unlock()
+		return buf
+	}
+	p.mu.Unlock()
+	return p.overflow.Get().([]byte)
+}
+
+func (p *blockPool) Put(buf []byte) {
+	buf = buf[:cap(buf)]
+	p.mu.Lock()
+	if len(p.list) < p.limit {
+		p.list = append(p.list, buf)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	p.overflow.Put(buf)
+}
+
+var BlockPool1M = newBlockPool(48, func() []byte {
+	return make([]byte, 1024*1024) // 1 MiB
+})
+
+var BlockPool1MPlus = newBlockPool(8, func() []byte {
+	return make([]byte, 1024*1024+pageSize)
+})
+
 
 // An incoming message from the kernel, including leading fusekernel.InHeader
 // struct. Provides storage for messages and convenient access to their
@@ -69,8 +100,7 @@ type InMessage struct {
 	blocks      [][]byte
 	size        int
 	consumed    int
-	tempBuffers [2]pooledBuffer
-	numTemps    int
+	iovecs      []unix.Iovec
 }
 
 // NewInMessage creates a new InMessage.
@@ -82,13 +112,13 @@ func (m *InMessage) AllocBlocks(totalSize int) {
 	m.FreeBlocks()
 
 	// Always allocate a 1MB+pageSize block first for header & metadata & payload
-	m.blocks = append(m.blocks, BlockPool1MPlus.Get().([]byte))
+	m.blocks = append(m.blocks, BlockPool1MPlus.Get())
 
 	if totalSize > len(m.blocks[0]) {
 		remaining := totalSize - len(m.blocks[0])
 		num1MBlocks := (remaining + 1024*1024 - 1) / (1024 * 1024)
 		for i := 0; i < num1MBlocks; i++ {
-			m.blocks = append(m.blocks, BlockPool1M.Get().([]byte))
+			m.blocks = append(m.blocks, BlockPool1M.Get())
 		}
 	}
 	m.consumed = 0
@@ -105,15 +135,6 @@ func (m *InMessage) FreeBlocks() {
 	m.blocks = nil
 	m.size = 0
 	m.consumed = 0
-
-	for i := 0; i < m.numTemps; i++ {
-		tb := m.tempBuffers[i]
-		if tb.pool != nil {
-			tb.pool.Put(tb.buf)
-		}
-		m.tempBuffers[i] = pooledBuffer{}
-	}
-	m.numTemps = 0
 }
 
 func (m *InMessage) ShrinkToFit(n int) {
@@ -163,6 +184,10 @@ type fder interface {
 	Fd() uintptr
 }
 
+type syscallConner interface {
+	SyscallConn() (syscall.RawConn, error)
+}
+
 // Initialize with the data read by a single call to r.Read or readv. The first call to
 // Consume will consume the bytes directly after the fusekernel.InHeader
 // struct.
@@ -191,8 +216,20 @@ func (m *InMessage) Init(r io.Reader) error {
 			}
 		}
 	} else {
-		if f, ok := r.(fder); ok {
-			n, err = readv(int(f.Fd()), m.blocks)
+		if sc, ok := r.(syscallConner); ok {
+			var rawConn syscall.RawConn
+			rawConn, err = sc.SyscallConn()
+			if err == nil {
+				var readvErr error
+				err = rawConn.Control(func(fd uintptr) {
+					n, m.iovecs, readvErr = readv(int(fd), m.blocks, m.iovecs)
+				})
+				if err == nil {
+					err = readvErr
+				}
+			}
+		} else if f, ok := r.(fder); ok {
+			n, m.iovecs, err = readv(int(f.Fd()), m.blocks, m.iovecs)
 		} else {
 			return fmt.Errorf("Reader does not support Fd")
 		}
@@ -287,12 +324,10 @@ func (m *InMessage) ConsumeBytes(n uintptr) []byte {
 		return b
 	}
 
-	buf, pool := getBuffer(int(n))
-	if pool != nil && m.numTemps < len(m.tempBuffers) {
-		m.tempBuffers[m.numTemps] = pooledBuffer{buf: buf, pool: pool}
-		m.numTemps++
-	}
-	res := buf[:n]
+	// In production, any spanning allocation is larger than 1MB (since block 0
+	// is 1MB + pageSize and fits all normal headers/payloads). Thus we always
+	// allocate directly from the heap.
+	res := make([]byte, n)
 	var bytesCopied = 0
 	var remainingToCopy = int(n)
 
@@ -370,10 +405,8 @@ func (m *InMessage) GetFree(n int, allocateDst bool) []byte {
 	if !allocateDst {
 		return nil
 	}
-	buf, pool := getBuffer(n)
-	if pool != nil && m.numTemps < len(m.tempBuffers) {
-		m.tempBuffers[m.numTemps] = pooledBuffer{buf: buf, pool: pool}
-		m.numTemps++
-	}
-	return buf[:n]
+	// Since n doesn't fit in block 0, and block 0 has size 1MB + pageSize,
+	// n is necessarily larger than 1MB (assuming typical small offset like
+	// sizeof(ReadIn)). Thus we always allocate directly on the heap.
+	return make([]byte, n)
 }

@@ -15,29 +15,33 @@
 package buffer
 
 import (
-	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
-func readv(fd int, packet [][]byte) (n int, err error) {
-	iovecs := make([]syscall.Iovec, 0, len(packet))
+func readv(fd int, packet [][]byte, iovecs []unix.Iovec) (n int, newIovecs []unix.Iovec, err error) {
+	iovecs = iovecs[:0]
 	for _, v := range packet {
 		if len(v) == 0 {
 			continue
 		}
-		vec := syscall.Iovec{
+		vec := unix.Iovec{
 			Base: &v[0],
 		}
 		vec.SetLen(len(v))
 		iovecs = append(iovecs, vec)
 	}
-	n1, _, e1 := syscall.Syscall(
-		syscall.SYS_READV,
+	if len(iovecs) == 0 {
+		return 0, iovecs, nil
+	}
+	n1, _, e1 := unix.Syscall(
+		unix.SYS_READV,
 		uintptr(fd), uintptr(unsafe.Pointer(&iovecs[0])), uintptr(len(iovecs)),
 	)
 	n = int(n1)
 	if e1 != 0 {
-		err = syscall.Errno(e1)
+		err = unix.Errno(e1)
 	}
-	return
+	return n, iovecs, err
 }

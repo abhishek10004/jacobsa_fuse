@@ -248,3 +248,29 @@ func BenchmarkAllocBlocks(b *testing.B) {
 		m.FreeBlocks()
 	}
 }
+
+type fakeFdReader struct {
+	fd uintptr
+}
+
+func (r fakeFdReader) Fd() uintptr {
+	return r.fd
+}
+
+func (r fakeFdReader) Read(p []byte) (int, error) {
+	return 0, nil
+}
+
+func BenchmarkInMessageInitWithReadv(b *testing.B) {
+	m := NewInMessage(0)
+	m.AllocBlocks(4096 + 2000)
+	r := fakeFdReader{fd: ^uintptr(0)} // -1
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = m.Init(r)
+	}
+	m.FreeBlocks()
+}
+

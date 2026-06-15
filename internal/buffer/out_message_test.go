@@ -276,13 +276,14 @@ func BenchmarkOutMessageReset(b *testing.B) {
 	// Many megabytes worth of buffers, which should defeat the CPU cache.
 	b.Run("Many buffers", func(b *testing.B) {
 		// The number of messages; intentionally a power of two.
-		const numMessages = 128
+		const numMessages = 2097152 // 2^21 * 40 bytes ≈ 80 MiB
 
-		var oms [numMessages]OutMessage
-		if s := unsafe.Sizeof(oms); s < 128<<20 {
+		oms := make([]OutMessage, numMessages)
+		if s := uintptr(len(oms)) * unsafe.Sizeof(OutMessage{}); s < 80<<20 {
 			panic(fmt.Sprintf("Array is too small; total size: %d", s))
 		}
 
+		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			oms[i%numMessages].Reset()
 		}
@@ -306,13 +307,14 @@ func BenchmarkOutMessageGrowShrink(b *testing.B) {
 	// Many megabytes worth of buffers, which should defeat the CPU cache.
 	b.Run("Many buffers", func(b *testing.B) {
 		// The number of messages; intentionally a power of two.
-		const numMessages = 128
+		const numMessages = 2097152 // 2^21 * 40 bytes ≈ 80 MiB
 
-		var oms [numMessages]OutMessage
-		if s := unsafe.Sizeof(oms); s < 128<<20 {
+		oms := make([]OutMessage, numMessages)
+		if s := uintptr(len(oms)) * unsafe.Sizeof(OutMessage{}); s < 80<<20 {
 			panic(fmt.Sprintf("Array is too small; total size: %d", s))
 		}
 
+		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			oms[i%numMessages].Grow(MaxReadSize)
 			oms[i%numMessages].ShrinkTo(OutMessageHeaderSize)
