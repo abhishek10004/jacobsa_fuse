@@ -259,6 +259,9 @@ type MountConfig struct {
 
 	// The maximum size of a FUSE message (in bytes) that the daemon is
 	// prepared to read or write. If not set, defaults to 1 MiB.
+	// NOTE: For MaxMessageSize greater than 1MiB, enabling EnableVectoredReads
+	// and EnableVectoredWrites is highly recommended to avoid significant
+	// performance regressions due to large heap allocations and copies.
 	MaxMessageSize uint32
 }
 

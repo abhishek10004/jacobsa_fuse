@@ -39,7 +39,6 @@ func GetPageSize() int {
 	return pageSize
 }
 
-
 type blockPool struct {
 	mu       sync.Mutex
 	list     [][]byte
@@ -92,15 +91,14 @@ var BlockPool1MPlus = newBlockPool(8, func() []byte {
 	return make([]byte, 1024*1024+pageSize)
 })
 
-
 // An incoming message from the kernel, including leading fusekernel.InHeader
 // struct. Provides storage for messages and convenient access to their
 // contents.
 type InMessage struct {
-	blocks      [][]byte
-	size        int
-	consumed    int
-	iovecs      []unix.Iovec
+	blocks   [][]byte
+	size     int
+	consumed int
+	iovecs   []unix.Iovec
 }
 
 // NewInMessage creates a new InMessage.
@@ -161,6 +159,8 @@ func (m *InMessage) ShrinkToFit(n int) {
 }
 
 var readLock sync.Mutex
+var fuseTContiguousPool sync.Pool
+
 
 func (m *InMessage) ReadSingleContiguous(r io.Reader, storage []byte) (int, error) {
 	readLock.Lock()
@@ -195,24 +195,41 @@ func (m *InMessage) Init(r io.Reader) error {
 	var n int
 	var err error
 	if fusekernel.IsPlatformFuseT {
-		var cap int
-		for _, b := range m.blocks {
-			cap += len(b)
-		}
-		storage := make([]byte, cap)
-		n, err = m.ReadSingleContiguous(r, storage)
-		if err == nil {
-			var copied int
+		if len(m.blocks) == 1 {
+			n, err = m.ReadSingleContiguous(r, m.blocks[0])
+		} else {
+			var cap int
 			for _, b := range m.blocks {
-				if copied >= n {
-					break
+				cap += len(b)
+			}
+			var storage []byte
+			if v := fuseTContiguousPool.Get(); v != nil {
+				buf := v.([]byte)
+				if len(buf) >= cap {
+					storage = buf[:cap]
 				}
-				toCopy := len(b)
-				if copied+toCopy > n {
-					toCopy = n - copied
+			}
+			if storage == nil {
+				storage = make([]byte, cap)
+			}
+			defer func() {
+				fuseTContiguousPool.Put(storage)
+			}()
+
+			n, err = m.ReadSingleContiguous(r, storage)
+			if err == nil {
+				var copied int
+				for _, b := range m.blocks {
+					if copied >= n {
+						break
+					}
+					toCopy := len(b)
+					if copied+toCopy > n {
+						toCopy = n - copied
+					}
+					copy(b, storage[copied:copied+toCopy])
+					copied += toCopy
 				}
-				copy(b, storage[copied:copied+toCopy])
-				copied += toCopy
 			}
 		}
 	} else {

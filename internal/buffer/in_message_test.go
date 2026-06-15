@@ -121,6 +121,76 @@ func TestInMessageConsumeAndBytes(t *testing.T) {
 	m.FreeBlocks()
 }
 
+func TestInMessageInitFuseT(t *testing.T) {
+	fusekernel.IsPlatformFuseT = true
+	defer func() {
+		fusekernel.IsPlatformFuseT = false
+	}()
+
+	runTest := func(t *testing.T, blockSizes []int) {
+		m := NewInMessage(0)
+		for _, sz := range blockSizes {
+			m.blocks = append(m.blocks, make([]byte, sz))
+		}
+
+		var totalBlockCap int
+		for _, b := range m.blocks {
+			totalBlockCap += len(b)
+		}
+
+		// Prepare dummy FUSE header + message
+		data := make([]byte, totalBlockCap)
+		header := (*fusekernel.InHeader)(unsafe.Pointer(&data[0]))
+		header.Len = uint32(totalBlockCap)
+		header.Opcode = 999
+		header.Unique = 888
+
+		// Write some test markers
+		data[40] = 0xAA
+		data[totalBlockCap-1] = 0xBB
+
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("Pipe failed: %v", err)
+		}
+		defer r.Close()
+
+		go func() {
+			_, _ = w.Write(data)
+			w.Close()
+		}()
+
+		err = m.Init(r)
+		if err != nil {
+			t.Fatalf("Init failed: %v", err)
+		}
+
+		if m.Header().Opcode != 999 {
+			t.Errorf("expected Opcode = 999, got %d", m.Header().Opcode)
+		}
+		if m.Header().Unique != 888 {
+			t.Errorf("expected Unique = 888, got %d", m.Header().Unique)
+		}
+
+		// Verify first block byte and last block byte
+		if m.blocks[0][40] != 0xAA {
+			t.Errorf("expected blocks[0][40] = 0xAA, got %x", m.blocks[0][40])
+		}
+		lastBlock := m.blocks[len(m.blocks)-1]
+		if lastBlock[len(lastBlock)-1] != 0xBB {
+			t.Errorf("expected last byte of last block = 0xBB, got %x", lastBlock[len(lastBlock)-1])
+		}
+	}
+
+	t.Run("single_block", func(t *testing.T) {
+		runTest(t, []int{110})
+	})
+
+	t.Run("multiple_blocks", func(t *testing.T) {
+		runTest(t, []int{50, 30, 30})
+	})
+}
+
 func TestInMessageGetFree(t *testing.T) {
 	m := NewInMessage(0)
 
@@ -273,4 +343,69 @@ func BenchmarkInMessageInitWithReadv(b *testing.B) {
 	}
 	m.FreeBlocks()
 }
+
+type fakeFuseTReader struct {
+	data []byte
+}
+
+func (r *fakeFuseTReader) Read(p []byte) (int, error) {
+	return copy(p, r.data), nil
+}
+
+func BenchmarkInMessageInitFuseT(b *testing.B) {
+	fusekernel.IsPlatformFuseT = true
+	defer func() {
+		fusekernel.IsPlatformFuseT = false
+	}()
+
+	m := NewInMessage(0)
+	totalSize := 1024*1024 + GetPageSize()
+	m.AllocBlocks(totalSize)
+	defer m.FreeBlocks()
+
+	data := make([]byte, totalSize)
+	header := (*fusekernel.InHeader)(unsafe.Pointer(&data[0]))
+	header.Len = uint32(totalSize)
+
+	r := &fakeFuseTReader{data: data}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		err := m.Init(r)
+		if err != nil {
+			b.Fatalf("Init failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkInMessageInitFuseTMultiBlock(b *testing.B) {
+	fusekernel.IsPlatformFuseT = true
+	defer func() {
+		fusekernel.IsPlatformFuseT = false
+	}()
+
+	m := NewInMessage(0)
+	firstBlockSize := 1024*1024 + GetPageSize()
+	totalSize := firstBlockSize + 2*1024*1024
+	m.AllocBlocks(totalSize)
+	defer m.FreeBlocks()
+
+	data := make([]byte, totalSize)
+	header := (*fusekernel.InHeader)(unsafe.Pointer(&data[0]))
+	header.Len = uint32(totalSize)
+
+	r := &fakeFuseTReader{data: data}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		err := m.Init(r)
+		if err != nil {
+			b.Fatalf("Init failed: %v", err)
+		}
+	}
+}
+
+
 
