@@ -286,6 +286,21 @@ func (m *InMessage) Len() uintptr {
 	return uintptr(m.size - m.consumed)
 }
 
+// getBlockAndOffset returns the block index and the local offset within that block
+// corresponding to the currently consumed logical bytes.
+func (m *InMessage) getBlockAndOffset() (blockIdx int, localOffset int) {
+	localOffset = m.consumed
+	for blockIdx < len(m.blocks) {
+		bLen := len(m.blocks[blockIdx])
+		if localOffset < bLen {
+			break
+		}
+		localOffset -= bLen
+		blockIdx++
+	}
+	return blockIdx, localOffset
+}
+
 // Consume the next n bytes from the message, returning a nil pointer if there
 // are fewer than n bytes available.
 func (m *InMessage) Consume(n uintptr) unsafe.Pointer {
@@ -293,17 +308,7 @@ func (m *InMessage) Consume(n uintptr) unsafe.Pointer {
 		return nil
 	}
 
-	var blockIdx = 0
-	var offset = m.consumed
-
-	for blockIdx < len(m.blocks) {
-		bLen := len(m.blocks[blockIdx])
-		if offset < bLen {
-			break
-		}
-		offset -= bLen
-		blockIdx++
-	}
+	blockIdx, offset := m.getBlockAndOffset()
 
 	if offset+int(n) > len(m.blocks[blockIdx]) {
 		m.consumed += int(n)
@@ -323,17 +328,7 @@ func (m *InMessage) ConsumeBytes(n uintptr) []byte {
 		return nil
 	}
 
-	var blockIdx = 0
-	var offset = m.consumed
-
-	for blockIdx < len(m.blocks) {
-		bLen := len(m.blocks[blockIdx])
-		if offset < bLen {
-			break
-		}
-		offset -= bLen
-		blockIdx++
-	}
+	blockIdx, offset := m.getBlockAndOffset()
 
 	if offset+int(n) <= len(m.blocks[blockIdx]) {
 		b := m.blocks[blockIdx][offset : offset+int(n)]
@@ -376,17 +371,7 @@ func (m *InMessage) ConsumeVector(n uintptr) [][]byte {
 		return nil
 	}
 
-	var blockIdx = 0
-	var offset = m.consumed
-
-	for blockIdx < len(m.blocks) {
-		bLen := len(m.blocks[blockIdx])
-		if offset < bLen {
-			break
-		}
-		offset -= bLen
-		blockIdx++
-	}
+	blockIdx, offset := m.getBlockAndOffset()
 
 	var res [][]byte
 	var remainingToCopy = int(n)
