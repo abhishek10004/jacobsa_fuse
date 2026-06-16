@@ -94,7 +94,13 @@ func formatWireLogEntry(op any, opErr error, wlog *WireLogRecord) ([]byte, error
 		args["BytesRead"] = typed.BytesRead
 
 	case *fuseops.WriteFileOp:
-		args["Size"] = len(typed.Data)
+		dataLen := len(typed.Data)
+		if dataLen == 0 && len(typed.DataBlocks) > 0 {
+			for _, b := range typed.DataBlocks {
+				dataLen += len(b)
+			}
+		}
+		args["Size"] = dataLen
 	}
 
 	wlog.Args = args
