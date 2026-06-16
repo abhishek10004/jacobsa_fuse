@@ -375,6 +375,44 @@ func (in *inode) WriteAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// WriteBlocksAt writes the given blocks at the specified offset.
+//
+// REQUIRES: in.isFile()
+func (in *inode) WriteBlocksAt(blocks [][]byte, off int64) (int, error) {
+	if !in.isFile() {
+		panic("WriteBlocksAt called on non-file.")
+	}
+
+	// Update the modification time.
+	in.attrs.Mtime = time.Now()
+
+	// Compute total length.
+	var totalLen int
+	for _, b := range blocks {
+		totalLen += len(b)
+	}
+
+	// Ensure that the contents slice is long enough.
+	newLen := int(off) + totalLen
+	if len(in.contents) < newLen {
+		padding := make([]byte, newLen-len(in.contents))
+		in.contents = append(in.contents, padding...)
+		in.attrs.Size = uint64(newLen)
+	}
+
+	// Copy in the data from each block.
+	var bytesWritten int
+	for _, b := range blocks {
+		n := copy(in.contents[off+int64(bytesWritten):], b)
+		if n != len(b) {
+			panic(fmt.Sprintf("Unexpected short copy: %v", n))
+		}
+		bytesWritten += n
+	}
+
+	return bytesWritten, nil
+}
+
 // Update attributes from non-nil parameters.
 func (in *inode) SetAttributes(
 	size *uint64,
