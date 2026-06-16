@@ -16,6 +16,7 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -399,20 +400,11 @@ func (c *Connection) readMessage() (*buffer.InMessage, error) {
 		//  *  EINTR means we should try again. (This seems to happen often on
 		//     OS X, cf. http://golang.org/issue/11180)
 		//
-		if err == syscall.ENODEV {
+		if errors.Is(err, syscall.ENODEV) {
 			err = io.EOF
-		} else if err == syscall.EINTR {
+		} else if errors.Is(err, syscall.EINTR) {
 			err = nil
 			continue
-		} else if pe, ok := err.(*os.PathError); ok {
-			switch pe.Err {
-			case syscall.ENODEV:
-				err = io.EOF
-
-			case syscall.EINTR:
-				err = nil
-				continue
-			}
 		}
 
 		if err != nil {
