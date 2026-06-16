@@ -158,6 +158,28 @@ func (m *InMessage) ShrinkToFit(n int) {
 	m.blocks = m.blocks[:usedBlocks]
 }
 
+var readLock sync.Mutex
+var fuseTContiguousPool sync.Pool
+
+
+func (m *InMessage) ReadSingleContiguous(r io.Reader, storage []byte) (int, error) {
+	readLock.Lock()
+	defer readLock.Unlock()
+
+	// read request length
+	if _, err := io.ReadFull(r, storage[0:4]); err != nil {
+		return 0, err
+	}
+
+	header := (*fusekernel.InHeader)(unsafe.Pointer(&storage[0]))
+	l := header.Len
+	// read remaining request
+	if n, err := io.ReadFull(r, storage[4:l]); err != nil {
+		return n, err
+	}
+	return int(l), nil
+}
+
 type fder interface {
 	Fd() uintptr
 }
@@ -172,22 +194,62 @@ type syscallConner interface {
 func (m *InMessage) Init(r io.Reader) error {
 	var n int
 	var err error
-	if sc, ok := r.(syscallConner); ok {
-		var rawConn syscall.RawConn
-		rawConn, err = sc.SyscallConn()
-		if err == nil {
-			var readvErr error
-			err = rawConn.Control(func(fd uintptr) {
-				n, m.iovecs, readvErr = readv(int(fd), m.blocks, m.iovecs)
-			})
+	if fusekernel.IsPlatformFuseT {
+		if len(m.blocks) == 1 {
+			n, err = m.ReadSingleContiguous(r, m.blocks[0])
+		} else {
+			var cap int
+			for _, b := range m.blocks {
+				cap += len(b)
+			}
+			var storage []byte
+			if v := fuseTContiguousPool.Get(); v != nil {
+				buf := v.([]byte)
+				if len(buf) >= cap {
+					storage = buf[:cap]
+				}
+			}
+			if storage == nil {
+				storage = make([]byte, cap)
+			}
+			defer func() {
+				fuseTContiguousPool.Put(storage)
+			}()
+
+			n, err = m.ReadSingleContiguous(r, storage)
 			if err == nil {
-				err = readvErr
+				var copied int
+				for _, b := range m.blocks {
+					if copied >= n {
+						break
+					}
+					toCopy := len(b)
+					if copied+toCopy > n {
+						toCopy = n - copied
+					}
+					copy(b, storage[copied:copied+toCopy])
+					copied += toCopy
+				}
 			}
 		}
-	} else if f, ok := r.(fder); ok {
-		n, m.iovecs, err = readv(int(f.Fd()), m.blocks, m.iovecs)
 	} else {
-		return fmt.Errorf("Reader does not support Fd")
+		if sc, ok := r.(syscallConner); ok {
+			var rawConn syscall.RawConn
+			rawConn, err = sc.SyscallConn()
+			if err == nil {
+				var readvErr error
+				err = rawConn.Control(func(fd uintptr) {
+					n, m.iovecs, readvErr = readv(int(fd), m.blocks, m.iovecs)
+				})
+				if err == nil {
+					err = readvErr
+				}
+			}
+		} else if f, ok := r.(fder); ok {
+			n, m.iovecs, err = readv(int(f.Fd()), m.blocks, m.iovecs)
+		} else {
+			return fmt.Errorf("Reader does not support Fd")
+		}
 	}
 
 	if err != nil {
