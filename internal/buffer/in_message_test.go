@@ -195,26 +195,21 @@ func TestInMessageGetFree(t *testing.T) {
 	m := NewInMessage(0)
 
 	// Case 1: len(m.blocks) == 0
-	// Subcase A: allocateDst = true -> should return valid buffer via fallback allocation
-	if buf := m.GetFree(10, true); len(buf) != 10 {
-		t.Errorf("expected buffer of size 10 when no blocks allocated and allocateDst=true, got %v", buf)
+	// should return valid buffer via fallback allocation
+	if buf := m.GetFree(10); len(buf) != 10 {
+		t.Errorf("expected buffer of size 10 when no blocks allocated, got %v", buf)
 	}
 	m.FreeBlocks()
-
-	// Subcase B: allocateDst = false -> should return nil
-	if buf := m.GetFree(10, false); buf != nil {
-		t.Errorf("expected nil when no blocks allocated and allocateDst=false, got %v", buf)
-	}
 
 	firstBlockSize := 1024*1024 + GetPageSize()
 	m.AllocBlocks(firstBlockSize)
 	m.size = 100 // Set message size to 100 bytes
 
-	// Case 2: n <= 0 -> should return nil (regardless of allocateDst)
-	if buf := m.GetFree(0, true); buf != nil {
+	// Case 2: n <= 0 -> should return nil
+	if buf := m.GetFree(0); buf != nil {
 		t.Errorf("expected nil for n=0, got %v", buf)
 	}
-	if buf := m.GetFree(-5, false); buf != nil {
+	if buf := m.GetFree(-5); buf != nil {
 		t.Errorf("expected nil for n=-5, got %v", buf)
 	}
 
@@ -222,8 +217,8 @@ func TestInMessageGetFree(t *testing.T) {
 	// remaining is: firstBlockSize - 100
 	tooLarge := firstBlockSize - 100 + 1
 
-	// Subcase A: allocateDst = true -> should return fallback buffer
-	bufTooLarge := m.GetFree(tooLarge, true)
+	// should return fallback buffer
+	bufTooLarge := m.GetFree(tooLarge)
 	if len(bufTooLarge) != tooLarge {
 		t.Errorf("expected buffer of size %d for too large request, got %d", tooLarge, len(bufTooLarge))
 	}
@@ -236,13 +231,8 @@ func TestInMessageGetFree(t *testing.T) {
 	m.AllocBlocks(firstBlockSize)
 	m.size = 100
 
-	// Subcase B: allocateDst = false -> should return nil
-	if buf := m.GetFree(tooLarge, false); buf != nil {
-		t.Errorf("expected nil for too large request when allocateDst=false, got %v", buf)
-	}
-
-	// Case 4: normal allocation within remaining space (should work for both true and false)
-	buf1 := m.GetFree(500, true)
+	// Case 4: normal allocation within remaining space
+	buf1 := m.GetFree(500)
 	if len(buf1) != 500 {
 		t.Errorf("expected buffer of size 500, got %d", len(buf1))
 	}
@@ -252,12 +242,65 @@ func TestInMessageGetFree(t *testing.T) {
 	}
 
 	// Slicing again (m.size is still 100, we don't advance m.size on GetFree)
-	buf2 := m.GetFree(500, false)
+	buf2 := m.GetFree(500)
 	if len(buf2) != 500 {
 		t.Errorf("expected buffer of size 500, got %d", len(buf2))
 	}
 	if &buf2[0] != expectedStart {
 		t.Errorf("expected buffer to start at index 100 of block 0")
+	}
+
+	m.FreeBlocks()
+}
+
+func TestInMessageGetFreeVector(t *testing.T) {
+	m := NewInMessage(0)
+
+	// Case 1: len(m.blocks) == 0 -> should return allocated blocks from pool
+	bufs := m.GetFreeVector(2 * 1024 * 1024 + 100) // 2MB + 100 bytes
+	if len(bufs) != 3 {
+		t.Errorf("expected 3 buffers, got %d", len(bufs))
+	} else {
+		if len(bufs[0]) != 1024*1024 || len(bufs[1]) != 1024*1024 || len(bufs[2]) != 100 {
+			t.Errorf("unexpected buffer sizes: %d, %d, %d", len(bufs[0]), len(bufs[1]), len(bufs[2]))
+		}
+	}
+	// Verify that freeing returning buffers to the pool works
+	m.FreeBlocks()
+
+	firstBlockSize := 1024*1024 + GetPageSize()
+	m.AllocBlocks(firstBlockSize)
+	m.size = 100 // Set message size to 100 bytes
+
+	// Case 2: n <= 0 -> should return nil
+	if bufs := m.GetFreeVector(0); bufs != nil {
+		t.Errorf("expected nil for n=0, got %v", bufs)
+	}
+	if bufs := m.GetFreeVector(-5); bufs != nil {
+		t.Errorf("expected nil for n=-5, got %v", bufs)
+	}
+
+	// Case 3: n fits in blocks[0]
+	fitSize := 500
+	bufsFit := m.GetFreeVector(fitSize)
+	if len(bufsFit) != 1 {
+		t.Errorf("expected 1 buffer, got %d", len(bufsFit))
+	} else if len(bufsFit[0]) != fitSize {
+		t.Errorf("expected buffer of size %d, got %d", fitSize, len(bufsFit[0]))
+	} else if &bufsFit[0][0] != &m.blocks[0][100] {
+		t.Errorf("expected buffer to start at index 100 of block 0")
+	}
+
+	// Case 4: n is larger than remaining space in blocks[0]
+	// remaining is: firstBlockSize - 100
+	tooLarge := firstBlockSize - 100 + 1
+	bufsTooLarge := m.GetFreeVector(tooLarge)
+	if len(bufsTooLarge) != 2 {
+		t.Errorf("expected 2 buffers, got %d", len(bufsTooLarge))
+	} else {
+		if len(bufsTooLarge[0]) != 1024*1024 || len(bufsTooLarge[1]) != tooLarge-1024*1024 {
+			t.Errorf("unexpected sizes: %d, %d", len(bufsTooLarge[0]), len(bufsTooLarge[1]))
+		}
 	}
 
 	m.FreeBlocks()
@@ -300,7 +343,7 @@ func BenchmarkGetFree(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		res := m.GetFree(10000, true)
+		res := m.GetFree(10000)
 		if len(res) != 10000 {
 			b.Fatalf("expected 10000, got %d", len(res))
 		}

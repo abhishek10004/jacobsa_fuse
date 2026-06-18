@@ -95,10 +95,11 @@ var BlockPool1MPlus = newBlockPool(8, func() []byte {
 // struct. Provides storage for messages and convenient access to their
 // contents.
 type InMessage struct {
-	blocks   [][]byte
-	size     int
-	consumed int
-	iovecs   []unix.Iovec
+	blocks         [][]byte
+	size           int
+	consumed       int
+	iovecs         []unix.Iovec
+	borrowedBlocks [][]byte
 }
 
 // NewInMessage creates a new InMessage.
@@ -131,6 +132,10 @@ func (m *InMessage) FreeBlocks() {
 		}
 	}
 	m.blocks = nil
+	for _, b := range m.borrowedBlocks {
+		BlockPool1M.Put(b)
+	}
+	m.borrowedBlocks = nil
 	m.size = 0
 	m.consumed = 0
 }
@@ -396,19 +401,42 @@ func (m *InMessage) ConsumeVector(n uintptr) [][]byte {
 }
 
 // Get a temporary buffer of n bytes. If it fits in the first block, we slice it
-// directly. If it does not fit, we allocate a separate buffer only if allocateDst is true.
-func (m *InMessage) GetFree(n int, allocateDst bool) []byte {
+// directly. If it does not fit, we allocate a separate buffer.
+func (m *InMessage) GetFree(n int) []byte {
 	if n <= 0 {
 		return nil
 	}
 	if len(m.blocks) > 0 && m.size+n <= len(m.blocks[0]) {
 		return m.blocks[0][m.size : m.size+n]
 	}
-	if !allocateDst {
-		return nil
-	}
 	// Since n doesn't fit in block 0, and block 0 has size 1MB + pageSize,
 	// n is necessarily larger than 1MB (assuming typical small offset like
 	// sizeof(ReadIn)). Thus we always allocate directly on the heap.
 	return make([]byte, n)
+}
+
+// GetFreeVector returns a temporary set of buffers summing to n bytes. If it fits
+// in the first block, we return a slice of the first block in a single-element slice.
+// If it does not fit, we allocate 1MB buffers from BlockPool1M.
+func (m *InMessage) GetFreeVector(n int) [][]byte {
+	if n <= 0 {
+		return nil
+	}
+	if len(m.blocks) > 0 && m.size+n <= len(m.blocks[0]) {
+		return [][]byte{m.blocks[0][m.size : m.size+n]}
+	}
+
+	var res [][]byte
+	remaining := n
+	for remaining > 0 {
+		block := BlockPool1M.Get()
+		m.borrowedBlocks = append(m.borrowedBlocks, block)
+		allocSize := 1024 * 1024
+		if remaining < allocSize {
+			allocSize = remaining
+		}
+		res = append(res, block[:allocSize])
+		remaining -= allocSize
+	}
+	return res
 }
