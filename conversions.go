@@ -398,7 +398,7 @@ func convertInMessage(
 		}
 		// Use part of the incoming message storage as the read buffer.
 		if config.EnableVectoredReads {
-			to.Data = inMsg.GetFreeVector(int(in.Size))
+			to.DstBufs = inMsg.GetFreeVector(int(in.Size))
 		} else {
 			to.Dst = inMsg.GetFree(int(in.Size))
 		}
@@ -953,6 +953,8 @@ func (c *Connection) kernelResponseForOp(
 	case *fuseops.ReadFileOp:
 		if o.Data != nil {
 			m.Append(o.Data...)
+		} else if o.DstBufs != nil {
+			m.Append(o.DstBufs...)
 		} else {
 			m.Append(o.Dst)
 		}
