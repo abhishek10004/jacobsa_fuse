@@ -2132,3 +2132,27 @@ func (t *AtmoicOTruncDisabledTest) SetUp(ti *TestInfo) {
 }
 
 func init() { RegisterTestSuite(&AtmoicOTruncDisabledTest{}) }
+
+type VectoredWritesTest struct {
+	memFSTest
+}
+
+func (t *VectoredWritesTest) SetUp(ti *TestInfo) {
+	t.MountConfig.EnableVectoredWrites = true
+	t.memFSTest.SetUp(ti)
+}
+
+func (t *VectoredWritesTest) TestVectoredWriteBasic() {
+	fileName := path.Join(t.Dir, "vectored_file")
+	const contents = "This is a test of vectored write payload. It should be parsed as DataBlocks."
+
+	err := os.WriteFile(fileName, []byte(contents), 0600)
+	AssertEq(nil, err)
+
+	data, err := os.ReadFile(fileName)
+	AssertEq(nil, err)
+	AssertEq(contents, string(data))
+}
+
+func init() { RegisterTestSuite(&VectoredWritesTest{}) }
+

@@ -251,11 +251,17 @@ type MountConfig struct {
 	// and copy overhead for large reads.
 	EnableVectoredReads bool
 
+	// EnableVectoredWrites bypasses copying write payload bytes into a single
+	// contiguous slice in WriteFileOp.Data, instead providing the raw non-contiguous
+	// blocks in WriteFileOp.DataBlocks. This improves performance by avoiding copies
+	// and allocations for large writes.
+	EnableVectoredWrites bool
+
 	// The maximum size of a FUSE message (in bytes) that the daemon is
 	// prepared to read or write. If not set, defaults to 1 MiB.
 	// NOTE: For MaxMessageSize greater than 1MiB, enabling EnableVectoredReads
-	// is highly recommended to avoid significant performance regressions due to
-	// large heap allocations and copies.
+	// and EnableVectoredWrites is highly recommended to avoid significant
+	// performance regressions due to large heap allocations and copies.
 	MaxMessageSize uint32
 }
 
