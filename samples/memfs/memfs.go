@@ -694,7 +694,12 @@ func (fs *memFS) WriteFile(
 	inode := fs.getInodeOrDie(op.Inode)
 
 	// Serve the request.
-	_, err := inode.WriteAt(op.Data, op.Offset)
+	var err error
+	if len(op.Data) > 0 {
+		_, err = inode.WriteAt(op.Data, op.Offset)
+	} else {
+		_, err = inode.WriteBlocksAt(op.DataBlocks, op.Offset)
+	}
 
 	op.Callback = fs.writeFileCallback
 

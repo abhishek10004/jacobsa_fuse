@@ -809,6 +809,7 @@ type WriteFileOp struct {
 	// to be because it uses file mmapping machinery
 	// (https://tinyurl.com/avxy3dvm) to write a page at a time.
 	Data      []byte
+	DataBlocks [][]byte
 	OpContext OpContext
 
 	// If set, this function will be invoked after the operation response has been
@@ -816,6 +817,18 @@ type WriteFileOp struct {
 	// freed.
 	Callback func()
 }
+
+// TotalSize returns the total size of the write payload.
+func (o *WriteFileOp) TotalSize() int {
+	dataLen := len(o.Data)
+	if dataLen == 0 && len(o.DataBlocks) > 0 {
+		for _, b := range o.DataBlocks {
+			dataLen += len(b)
+		}
+	}
+	return dataLen
+}
+
 
 // Synchronize the current contents of an open file to storage.
 //

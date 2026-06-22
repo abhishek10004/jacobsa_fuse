@@ -100,7 +100,7 @@ func describeRequest(op interface{}) (s string) {
 	case *fuseops.WriteFileOp:
 		addComponent("handle %d", typed.Handle)
 		addComponent("offset %d", typed.Offset)
-		addComponent("%d bytes", len(typed.Data))
+		addComponent("%d bytes", typed.TotalSize())
 
 	case *fuseops.RemoveXattrOp:
 		addComponent("name %s", typed.Name)
