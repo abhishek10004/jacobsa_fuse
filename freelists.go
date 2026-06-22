@@ -39,6 +39,7 @@ func (c *Connection) getInMessage() *buffer.InMessage {
 
 // LOCKS_EXCLUDED(c.mu)
 func (c *Connection) putInMessage(x *buffer.InMessage) {
+	x.FreeBlocks()
 	c.mu.Lock()
 	c.inMessages.Put(unsafe.Pointer(x))
 	c.mu.Unlock()

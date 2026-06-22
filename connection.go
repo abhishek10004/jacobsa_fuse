@@ -181,7 +181,7 @@ func (c *Connection) Init() error {
 	// Respond to the init op.
 	initOp.Library = c.protocol
 	initOp.MaxReadahead = maxReadahead
-	
+
 	maxPayload := c.inMessageSize - buffer.GetPageSize()
 	initOp.MaxWrite = uint32(maxPayload)
 
@@ -386,6 +386,7 @@ func (c *Connection) handleInterrupt(fuseID uint64) {
 func (c *Connection) readMessage() (*buffer.InMessage, error) {
 	// Allocate a message.
 	m := c.getInMessage()
+	m.AllocBlocks(c.inMessageSize)
 
 	// Loop past transient errors.
 	for {
@@ -405,6 +406,7 @@ func (c *Connection) readMessage() (*buffer.InMessage, error) {
 			err = nil
 			continue
 		}
+
 		if err != nil {
 			c.putInMessage(m)
 			return nil, err

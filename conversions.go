@@ -145,13 +145,14 @@ func convertInMessage(
 		}
 
 		entries := make([]fuseops.BatchForgetEntry, 0, in.Count)
-		for i := uint32(0); i < in.Count; i++ {
-			type entry fusekernel.BatchForgetEntryIn
-			ein := (*entry)(inMsg.Consume(unsafe.Sizeof(entry{})))
-			if ein == nil {
-				return nil, errors.New("Corrupt OpBatchForget")
-			}
+		entrySize := unsafe.Sizeof(fusekernel.BatchForgetEntryIn{})
+		buf := inMsg.ConsumeBytes(uintptr(in.Count) * entrySize)
+		if len(buf) < int(in.Count*uint32(entrySize)) {
+			return nil, errors.New("Corrupt OpBatchForget")
+		}
 
+		for i := uint32(0); i < in.Count; i++ {
+			ein := (*fusekernel.BatchForgetEntryIn)(unsafe.Pointer(&buf[uintptr(i)*entrySize]))
 			entries = append(entries, fuseops.BatchForgetEntry{
 				Inode: fuseops.InodeID(ein.Inode),
 				N:     ein.Nlookup,
@@ -396,7 +397,11 @@ func convertInMessage(
 			},
 		}
 		// Use part of the incoming message storage as the read buffer.
-		to.Dst = inMsg.GetFree(int(in.Size))
+		if config.EnableVectoredReads && int(in.Size) > buffer.MiBPlusPageSize {
+			to.DstBufs = inMsg.GetFreeVector(int(in.Size))
+		} else {
+			to.Dst = inMsg.GetFree(int(in.Size))
+		}
 		o = to
 
 	case fusekernel.OpReaddir:
@@ -933,6 +938,8 @@ func (c *Connection) kernelResponseForOp(
 	case *fuseops.ReadFileOp:
 		if o.Data != nil {
 			m.Append(o.Data...)
+		} else if o.DstBufs != nil {
+			m.Append(o.DstBufs...)
 		} else {
 			m.Append(o.Dst)
 		}
