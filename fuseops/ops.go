@@ -709,13 +709,22 @@ type ReadFileOp struct {
 	// The size of the read.
 	Size int64
 
-	// The destination buffer, whose length gives the size of the read.
-	// The file system can write to this buffer for non-vectored reads.
+	// The destination buffer. If the requested read size is small enough (typically
+	// up to 1 MiB), the library provides this buffer, whose length matches the size of
+	// the read, utilizing its pre-allocated request memory. The file system can write
+	// to this buffer for non-vectored reads.
+	//
+	// If the requested read size is larger than the library's pre-allocated buffer
+	// (e.g., when MountConfig.MaxPages is configured to support larger reads), this
+	// slice will be nil.
 	Dst []byte
 
 	// Set by the file system:
 	// A list of slices of data to send back to the client.
 	// If this field is populated, the contents of `Dst` will be ignored.
+	//
+	// The file system must use this field to return data if Dst is nil
+	// (which happens when MountConfig.MaxPages is configured to support reads larger than 1 MiB).
 	Data [][]byte
 
 	// Set by the file system: the number of bytes read.

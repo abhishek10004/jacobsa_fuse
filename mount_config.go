@@ -241,6 +241,21 @@ type MountConfig struct {
 	// to always provide ReadFileOp.Dst. If the file system populates ReadFileOp.Data,
 	// that data will be used for a vectored read, irrespective of this flag's value.
 	UseVectoredRead bool
+
+	// Linux only.
+	//
+	// If set, this specifies the maximum number of hardware pages that the
+	// FUSE message payload can use. This will be passed to the kernel during the
+	// FUSE_INIT phase.
+	//
+	// If set, it must be at least the value required to support the default
+	// maximum read/write size (1 MiB), which is typically 256 pages (for 4KB
+	// page size). Configuring a value smaller than this will cause Mount to
+	// return an error.
+	//
+	// If unset, a default value based on the maximum message in/out payload
+	// sizes is used.
+	MaxPages uint16
 }
 
 type FUSEImpl uint8
