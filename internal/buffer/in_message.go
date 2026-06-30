@@ -52,8 +52,8 @@ type InMessage struct {
 	size      int
 }
 
-// NewInMessage creates a new InMessage with its storage initialized.
-func NewInMessage() *InMessage {
+// NewInMessage creates a new InMessage with its storage initialized with the given bufSize.
+func NewInMessage(bufSize int) *InMessage {
 	return &InMessage{
 		storage: make([]byte, bufSize),
 	}

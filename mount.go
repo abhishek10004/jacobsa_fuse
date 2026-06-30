@@ -23,8 +23,6 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
-
-	"github.com/jacobsa/fuse/internal/buffer"
 )
 
 // Server is an interface for any type that knows how to serve ops read from a
@@ -47,16 +45,6 @@ func Mount(
 	// saves us from some confusing errors later on OS X.
 	if err := checkMountPoint(dir); err != nil {
 		return nil, err
-	}
-
-	// Validate MaxPages.
-	if config.MaxPages > 0 {
-		pageSize := buffer.GetPageSize()
-		maxPayload := max(buffer.MaxReadSize, buffer.MaxWriteSize)
-		minPages := uint16(maxPayload / pageSize)
-		if config.MaxPages < minPages {
-			return nil, fmt.Errorf("MaxPages must be at least %d", minPages)
-		}
 	}
 
 	// Initialize the struct.

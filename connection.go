@@ -80,6 +80,9 @@ type Connection struct {
 	// Freelists, serviced by freelists.go.
 	inMessages  freelist.Freelist // GUARDED_BY(mu)
 	outMessages freelist.Freelist // GUARDED_BY(mu)
+
+	// Size of the buffer to allocate for each InMessage.
+	inMessageBufSize int
 }
 
 // State that is maintained for each in-flight op. This is stuffed into the
@@ -132,6 +135,12 @@ func newConnection(
 
 // Init performs the work necessary to cause the mount process to complete.
 func (c *Connection) Init() error {
+	if err := c.sanitizeMaxPagesAndWrite(); err != nil {
+		return err
+	}
+
+	c.inMessageBufSize = buffer.GetPageSize() + int(c.cfg.MaxWrite)
+
 	// Read the init op.
 	ctx, op, err := c.ReadOp()
 	if err != nil {
@@ -172,7 +181,7 @@ func (c *Connection) Init() error {
 	// Respond to the init op.
 	initOp.Library = c.protocol
 	initOp.MaxReadahead = maxReadahead
-	initOp.MaxWrite = buffer.MaxWriteSize
+	initOp.MaxWrite = c.cfg.MaxWrite
 
 	initOp.Flags = 0
 
@@ -189,12 +198,7 @@ func (c *Connection) Init() error {
 	// MaxPages is the maximum size, in hardware pages, of the FUSE message
 	// payload. It applies to both requests and replies, and does not include
 	// the extra 1 page for the FUSE header and the "args" struct.
-	if c.cfg.MaxPages > 0 {
-		initOp.MaxPages = c.cfg.MaxPages
-	} else {
-		maxPayload := max(buffer.MaxReadSize, buffer.MaxWriteSize)
-		initOp.MaxPages = uint16(maxPayload / buffer.GetPageSize())
-	}
+	initOp.MaxPages = c.cfg.MaxPages
 
 	// Enable writeback caching if the user hasn't asked us not to.
 	if !c.cfg.DisableWritebackCaching {
@@ -618,6 +622,32 @@ func (c *Connection) callbackForOp(op interface{}) func() {
 	case *fuseops.WriteFileOp:
 		return o.Callback
 	}
+	return nil
+}
+
+func (c *Connection) sanitizeMaxPagesAndWrite() error {
+	pageSize := uint32(buffer.GetPageSize())
+
+	// If neither are given, set them both to the default based on MaxReadSize & MaxWriteSize.
+	if c.cfg.MaxPages == 0 && c.cfg.MaxWrite == 0 {
+		c.cfg.MaxWrite = buffer.MaxWriteSize
+		maxPayload := max(uint32(buffer.MaxReadSize), uint32(buffer.MaxWriteSize))
+		c.cfg.MaxPages = uint16(maxPayload / pageSize)
+	} else if c.cfg.MaxPages != 0 && c.cfg.MaxWrite == 0 {
+		// If only MaxPages is given, set MaxWrite based on MaxPages.
+		c.cfg.MaxWrite = uint32(c.cfg.MaxPages) * pageSize
+	} else if c.cfg.MaxPages == 0 && c.cfg.MaxWrite != 0 {
+		// If only MaxWrite is given, MaxPages defaults to max(MaxWrite, MaxReadSize).
+		maxPayload := max(c.cfg.MaxWrite, uint32(buffer.MaxReadSize))
+		c.cfg.MaxPages = uint16((maxPayload + pageSize - 1) / pageSize)
+	}
+
+	// Validate: MaxPages needs to be >= MaxWrite (in bytes)
+	if uint32(c.cfg.MaxPages)*pageSize < c.cfg.MaxWrite {
+		return fmt.Errorf("MaxPages (%d pages, %d bytes) must be at least MaxWrite (%d bytes)",
+			c.cfg.MaxPages, uint32(c.cfg.MaxPages)*pageSize, c.cfg.MaxWrite)
+	}
+
 	return nil
 }
 

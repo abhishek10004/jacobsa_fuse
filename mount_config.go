@@ -248,14 +248,32 @@ type MountConfig struct {
 	// FUSE message payload can use. This will be passed to the kernel during the
 	// FUSE_INIT phase.
 	//
-	// If set, it must be at least the value required to support the default
-	// maximum read/write size (1 MiB), which is typically 256 pages (for 4KB
-	// page size). Configuring a value smaller than this will cause Mount to
-	// return an error.
+	// It applies to both requests (e.g., write) and replies (e.g., read).
 	//
-	// If unset, a default value based on the maximum message in/out payload
-	// sizes is used.
+	// If you want to support larger read requests (e.g., 2 MiB) but keep the
+	// default write size, you only need to increase MaxPages (e.g., to 512
+	// for a 4KB page size).
+	//
+	// If unset, a default value based on the maximum of the default read and
+	// write sizes is used (typically 256 pages, which is 1 MiB for a 4KB page size).
+	//
+	// If MaxPages is unset but MaxWrite is set, MaxPages will default to a
+	// value large enough to support both MaxWrite and the default read size.
+	//
+	// If MaxPages is set but MaxWrite is unset, MaxWrite will be limited based
+	// on MaxPages (i.e., MaxPages * PageSize).
 	MaxPages uint16
+
+	// If set, this specifies the maximum size in bytes of a write request
+	// that the FUSE connection will support. This will be passed to the kernel
+	// during the FUSE_INIT phase.
+	//
+	// Note that if you increase MaxWrite, you must also ensure MaxPages is
+	// large enough to support it (MaxPages >= MaxWrite / PageSize).
+	//
+	// If unset, a default value of 1 MiB is used (or less if MaxPages is set
+	// to a value smaller than 256 pages).
+	MaxWrite uint32
 }
 
 type FUSEImpl uint8
