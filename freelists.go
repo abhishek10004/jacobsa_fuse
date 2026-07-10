@@ -31,7 +31,7 @@ func (c *Connection) getInMessage() *buffer.InMessage {
 	c.mu.Unlock()
 
 	if x == nil {
-		x = buffer.NewInMessage()
+		x = buffer.NewInMessage(c.inMessageSize)
 	}
 
 	return x
@@ -39,6 +39,7 @@ func (c *Connection) getInMessage() *buffer.InMessage {
 
 // LOCKS_EXCLUDED(c.mu)
 func (c *Connection) putInMessage(x *buffer.InMessage) {
+	x.FreeBlocks()
 	c.mu.Lock()
 	c.inMessages.Put(unsafe.Pointer(x))
 	c.mu.Unlock()

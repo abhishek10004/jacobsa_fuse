@@ -16,6 +16,7 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -80,6 +81,8 @@ type Connection struct {
 	// Freelists, serviced by freelists.go.
 	inMessages  freelist.Freelist // GUARDED_BY(mu)
 	outMessages freelist.Freelist // GUARDED_BY(mu)
+
+	inMessageSize int
 }
 
 // State that is maintained for each in-flight op. This is stuffed into the
@@ -120,6 +123,12 @@ func newConnection(
 		dev:         dev,
 		cancelFuncs: make(map[uint64]func()),
 	}
+
+	maxPayload := max(buffer.MaxReadSize, buffer.MaxWriteSize)
+	if cfg.MaxMessageSize > 0 {
+		maxPayload = max(maxPayload, int(cfg.MaxMessageSize))
+	}
+	c.inMessageSize = maxPayload + buffer.GetPageSize()
 
 	// Initialize.
 	if err := c.Init(); err != nil {
@@ -172,7 +181,9 @@ func (c *Connection) Init() error {
 	// Respond to the init op.
 	initOp.Library = c.protocol
 	initOp.MaxReadahead = maxReadahead
-	initOp.MaxWrite = buffer.MaxWriteSize
+
+	maxPayload := c.inMessageSize - buffer.GetPageSize()
+	initOp.MaxWrite = uint32(maxPayload)
 
 	initOp.Flags = 0
 
@@ -190,7 +201,6 @@ func (c *Connection) Init() error {
 	// payload. It applies to both requests and replies, and does not include
 	// the extra 1 page for the FUSE header and the "args" struct. We set it to
 	// the max of our message in/out payload sizes.
-	maxPayload := max(buffer.MaxReadSize, buffer.MaxWriteSize)
 	initOp.MaxPages = uint16(maxPayload / buffer.GetPageSize())
 
 	// Enable writeback caching if the user hasn't asked us not to.
@@ -376,6 +386,7 @@ func (c *Connection) handleInterrupt(fuseID uint64) {
 func (c *Connection) readMessage() (*buffer.InMessage, error) {
 	// Allocate a message.
 	m := c.getInMessage()
+	m.AllocBlocks(c.inMessageSize)
 
 	// Loop past transient errors.
 	for {
@@ -389,15 +400,11 @@ func (c *Connection) readMessage() (*buffer.InMessage, error) {
 		//  *  EINTR means we should try again. (This seems to happen often on
 		//     OS X, cf. http://golang.org/issue/11180)
 		//
-		if pe, ok := err.(*os.PathError); ok {
-			switch pe.Err {
-			case syscall.ENODEV:
-				err = io.EOF
-
-			case syscall.EINTR:
-				err = nil
-				continue
-			}
+		if errors.Is(err, syscall.ENODEV) {
+			err = io.EOF
+		} else if errors.Is(err, syscall.EINTR) {
+			err = nil
+			continue
 		}
 
 		if err != nil {
